@@ -1,0 +1,29 @@
+Web- SQL injection cheat sheet: https://portswigger.net/web-security/sql-injection/cheat-sheet  
+
+Linux Commands List Cheat Sheet: https://www.geeksforgeeks.org/linux-unix/linux-commands-cheat-sheet/#directory  
+
+Net - Subnetting Cheat Sheet: https://nsrc.org/workshops/2009/summer/presentations/day3/subnetting.pdf 
+
+Net - All Wireshark display filters- https://www.wireshark.org/docs/dfref/  
+
+OWASP Top 10: https://owasp.org/www-project-top-ten/  
+
+Net - Nmap Cheat Sheet: https://cdn.comparitech.com/wp-content/uploads/2019/06/Nmap-Cheat-Sheet.pdf  
+
+Windows- Enumeration checklist: https://cheatsheet.haax.fr/windows-systems/local-and-physical/local_recon_enumeration/ 
+
+ Web- Common CVE’s/Exploits: https://cheatsheet.haax.fr/web-pentest/cve_exploits/  
+
+Hashcat Cheat Sheet- https://cheatsheet.haax.fr/passcracking-hashfiles/hashcat_cheatsheet/  
+
+Windows- Active Directory enumeration cheat sheet- https://github.com/S1ckB0y1337/Active-Directory-Exploitation-Cheat-Sheet?tab=readme-ov-file#active-directory-exploitation-cheat-sheet  
+
+Metasploit Cheat Sheet - https://cdn.comparitech.com/wp-content/uploads/2019/06/Metasploit-Cheat-Sheet.pdf 
+
+OpenVAS introduction w/ basic commands -- https://infosecwriteups.com/introduction-to-openvas-a-vulnerability-scanner-cd5bf830e2fe 
+
+Bloodhound (AD) Cheat Sheet -- https://www.wwt.com/api-new/attachments/66a7b8d6ddfa33117e771706/file 
+
+PfSense Basics - https://docs.netgate.com/pfsense/en/latest/config/console-menu.html 
+
+Firewall Pentesting tips - https://purplesec.us/learn/firewall-penetration-testing/ 
