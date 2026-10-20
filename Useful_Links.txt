@@ -27,5 +27,3 @@ Bloodhound (AD) Cheat Sheet -- https://www.wwt.com/api-new/attachments/66a7b8d6d
 PfSense Basics - https://docs.netgate.com/pfsense/en/latest/config/console-menu.html 
 
 Firewall Pentesting tips - https://purplesec.us/learn/firewall-penetration-testing/ 
-
-Testing if I can add to this -RH
