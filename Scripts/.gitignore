@@ -1,5 +1,10 @@
-# Never commit evidence, collected usernames, or engagement-specific scope files.
+# Scan evidence can contain internal hostnames and usernames.
 results/
+# Explicitly scoped local working file may be sensitive and should be operator-specific.
 config/scope.txt
+# Never commit Kerberos credentials or other secrets.
+*.ccache
+*.kirbi
+*.pfx
+*.key
 __pycache__/
-*.pyc

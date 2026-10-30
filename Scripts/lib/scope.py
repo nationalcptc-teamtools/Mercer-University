@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Shared, dependency-free scope validation and Nmap XML parsers.
+"""Validate authorized scope and turn Nmap XML into reviewable CSV files.
 
-All scripts call this helper rather than trying to parse IP ranges with grep.
-Every hosts file is checked against the *explicit* approved scope file.
+Scope syntax (one entry per line): IPv4, CIDR, inclusive start-end IPv4 range,
+or the same entry prefixed with ! to EXCLUDE it. Comments start with #.
+This helper is deliberately strict: out-of-scope targets abort the script.
 """
-
 import argparse
 import csv
 import ipaddress
@@ -17,174 +17,241 @@ def fail(message):
     raise ValueError(message)
 
 
-def source_lines(path):
+def entries(path):
     with open(path, encoding="utf-8") as handle:
-        for number, line in enumerate(handle, 1):
-            entry = line.split("#", 1)[0].strip()
-            if entry:
-                yield number, entry
+        for line_no, raw in enumerate(handle, 1):
+            value = raw.split('#', 1)[0].strip()
+            if value:
+                yield line_no, value
+
+
+def parse_entry(value, source):
+    """Convert inclusive start-end ranges to exact CIDRs; never round outward."""
+    if '-' in value:
+        parts = value.split('-')
+        if len(parts) != 2:
+            fail(f"{source}: invalid start-end range {value!r}")
+        try:
+            first, last = (ipaddress.IPv4Address(part.strip()) for part in parts)
+        except ipaddress.AddressValueError as exc:
+            fail(f"{source}: {exc}")
+        if int(last) < int(first):
+            fail(f"{source}: range end precedes start: {value!r}")
+        if int(last) - int(first) + 1 > 65536:
+            fail(f"{source}: ranges larger than 65,536 addresses are refused")
+        return list(ipaddress.summarize_address_range(first, last))
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        fail(f"{source}: invalid scope entry {value!r}: {exc}")
+    if net.version != 4:
+        fail(f"{source}: IPv6 is not supported")
+    if net.prefixlen < 16:
+        fail(f"{source}: scope broader than /16 is refused: {value!r}")
+    return [net]
+
+
+class Scope:
+    def __init__(self, includes, excludes):
+        self.includes = includes
+        self.excludes = excludes
+
+    def allows(self, ip):
+        return any(ip in n for n in self.includes) and not any(ip in n for n in self.excludes)
 
 
 def read_scope(path):
-    """Require explicit IPv4 CIDRs/IPs; reject unexpectedly broad targets."""
-    networks = []
-    for number, item in source_lines(path):
-        try:
-            network = ipaddress.ip_network(item, strict=False)
-        except ValueError as exc:
-            fail(f"{path}:{number}: invalid scope entry {item!r}: {exc}")
-        if network.version != 4:
-            fail(f"{path}:{number}: IPv6 is not supported by these starter scripts")
-        if network.prefixlen < 16:
-            fail(f"{path}:{number}: {item!r} is broader than /16; split it into approved ranges")
-        if network.is_multicast or network.is_loopback or network.is_unspecified:
-            fail(f"{path}:{number}: special-purpose IP space is not an assessment scope")
-        if network not in networks:
-            networks.append(network)
-    if not networks:
-        fail(f"{path}: no scope entries; populate it with approved target IPs/CIDRs")
-    return networks
+    includes, excludes = [], []
+    for line_no, value in entries(path):
+        excluded = value.startswith('!')
+        value = value[1:].strip() if excluded else value
+        nets = parse_entry(value, f"{path}:{line_no}")
+        for n in nets:
+            if n.is_multicast or n.is_loopback or n.is_unspecified:
+                fail(f"{path}:{line_no}: special-purpose address range is not accepted")
+            target = excludes if excluded else includes
+            if n not in target:
+                target.append(n)
+    if not includes:
+        fail(f"{path}: no permitted IPs/CIDRs/ranges")
+    return Scope(includes, excludes)
 
 
 def write_lines(path, values):
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("".join(f"{value}\n" for value in values), encoding="utf-8")
+    out.write_text(''.join(f'{v}\n' for v in values), encoding='utf-8')
 
 
-def read_hosts(path, networks):
+def read_hosts(path, scope):
     hosts = set()
-    for number, item in source_lines(path):
+    for line_no, value in entries(path):
         try:
-            ip = ipaddress.ip_address(item)
-        except ValueError:
-            fail(f"{path}:{number}: expected one IPv4 host per line, got {item!r}")
-        if ip.version != 4 or not any(ip in net for net in networks):
-            fail(f"{path}:{number}: {ip} is OUTSIDE the approved scope")
+            ip = ipaddress.IPv4Address(value)
+        except ipaddress.AddressValueError:
+            fail(f"{path}:{line_no}: expected one IPv4 address, got {value!r}")
+        if not scope.allows(ip):
+            fail(f"{path}:{line_no}: {ip} is outside approved scope or excluded")
         hosts.add(ip)
     if not hosts:
-        fail(f"{path}: no in-scope hosts to scan")
+        fail(f"{path}: empty in-scope host list")
     return sorted(hosts)
 
 
 def xml_hosts(path):
-    """Read the Nmap XML output, not screen text or unstable grep columns."""
-    root = ET.parse(path).getroot()
-    for host in root.findall("host"):
-        address = next(
-            (node.get("addr") for node in host.findall("address")
-             if node.get("addrtype") == "ipv4"), None
-        )
-        if address:
-            yield host, ipaddress.ip_address(address)
+    for host in ET.parse(path).getroot().findall('host'):
+        ip_text = next((n.get('addr') for n in host.findall('address')
+                        if n.get('addrtype') == 'ipv4'), None)
+        if ip_text:
+            yield host, ipaddress.IPv4Address(ip_text)
 
 
-def summarize_discovery(scopes, filenames, host_output, provenance_csv):
-    by_ip = {}
-    for filename in filenames:
-        method = Path(filename).stem
-        for host, ip in xml_hosts(filename):
-            if host.find("status") is None or host.find("status").get("state") != "up":
-                continue
-            if not any(ip in net for net in scopes):
-                fail(f"Unexpected out-of-scope discovery result: {ip}")
-            by_ip.setdefault(ip, set()).add(method)
-    ordered = sorted(by_ip)
-    write_lines(host_output, ordered)
-    with open(provenance_csv, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["ip", "discovery_methods"])
-        for ip in ordered:
-            writer.writerow([str(ip), ";".join(sorted(by_ip[ip]))])
-    print(f"Discovered {len(ordered)} in-scope live host(s): {host_output}")
-
-
-def csv_text(value):
-    """Avoid spreadsheet formula execution from untrusted service banners."""
-    text = str(value)
-    if text.lstrip().startswith(("=", "+", "-", "@")):
-        return "'" + text
-    return text
-
-
-def summarize_ports(xml_file, csv_file, scopes):
-    with open(csv_file, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["ip", "protocol", "port", "state", "service", "product", "version"])
-        rows = 0
-        for host, ip in xml_hosts(xml_file):
-            if not any(ip in net for net in scopes):
-                fail(f"Unexpected out-of-scope scan result: {ip}")
-            for port in host.findall("./ports/port"):
-                state = port.find("state")
-                if state is None or state.get("state") != "open":
-                    continue
-                service = port.find("service")
-                data = service.attrib if service is not None else {}
-                writer.writerow([csv_text(value) for value in [
-                    str(ip), port.get("protocol", ""), port.get("portid", ""),
-                    "open", data.get("name", ""), data.get("product", ""),
-                    data.get("version", ""),
-                ]])
-                rows += 1
-    print(f"Recorded {rows} open-port row(s): {csv_file}")
-
-
-def service_hosts(xml_file, port, output, scopes):
-    candidates = set()
+def checked_host_rows(xml_file, scope):
     for host, ip in xml_hosts(xml_file):
-        if not any(ip in net for net in scopes):
-            fail(f"Unexpected out-of-scope scan result: {ip}")
-        for item in host.findall("./ports/port"):
-            state = item.find("state")
-            if item.get("portid") == str(port) and state is not None and state.get("state") == "open":
-                candidates.add(ip)
-    write_lines(output, sorted(candidates))
-    print(f"Port {port}: {len(candidates)} host(s)")
+        if not scope.allows(ip):
+            fail(f"Out-of-scope result in {xml_file}: {ip}")
+        yield host, ip
+
+
+def discovery(scope, xmls, host_file, method_file):
+    methods = {}
+    for xml in xmls:
+        for host, ip in checked_host_rows(xml, scope):
+            status = host.find('status')
+            if status is not None and status.get('state') == 'up':
+                methods.setdefault(ip, set()).add(Path(xml).stem)
+    ips = sorted(methods)
+    write_lines(host_file, ips)
+    with open(method_file, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(['ip', 'discovery_methods'])
+        for ip in ips:
+            w.writerow([str(ip), ';'.join(sorted(methods[ip]))])
+    print(f"Discovered {len(ips)} permitted host(s): {host_file}")
+
+
+def csv_safe(value):
+    text = str(value)
+    return "'" + text if text.lstrip().startswith(('=', '+', '-', '@')) else text
+
+
+def ports(scope, xml, output):
+    count = 0
+    with open(output, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(['ip', 'protocol', 'port', 'state', 'service', 'product', 'version'])
+        for host, ip in checked_host_rows(xml, scope):
+            for port in host.findall('./ports/port'):
+                status = port.find('state')
+                if status is None or status.get('state') != 'open':
+                    continue
+                service = port.find('service')
+                data = service.attrib if service is not None else {}
+                w.writerow([csv_safe(v) for v in (
+                    ip, port.get('protocol', ''), port.get('portid', ''),
+                    'open', data.get('name', ''), data.get('product', ''),
+                    data.get('version', ''))])
+                count += 1
+    print(f"Saved {count} open TCP service(s): {output}")
+
+
+def service_hosts(scope, xml, port, output):
+    found = set()
+    for host, ip in checked_host_rows(xml, scope):
+        for entry in host.findall('./ports/port'):
+            state = entry.find('state')
+            if entry.get('portid') == str(port) and state is not None and state.get('state') == 'open':
+                found.add(ip)
+    write_lines(output, sorted(found))
+    print(f"TCP {port}: {len(found)} host(s)")
+
+
+def os_inventory(scope, known_hosts, os_xml, output):
+    """OS fingerprint is a hypothesis, not confirmation; preserve Nmap accuracy."""
+    known = read_hosts(known_hosts, scope)
+    results = {}
+    for host, ip in checked_host_rows(os_xml, scope):
+        matches = host.findall('./os/osmatch')
+        if matches:
+            top = max(matches, key=lambda item: int(item.get('accuracy', '0')))
+            results[ip] = (top.get('name', 'unknown'), top.get('accuracy', ''))
+    with open(output, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(['ip', 'os_guess', 'nmap_match_percent', 'note'])
+        for ip in known:
+            guess, accuracy = results.get(ip, ('Unknown', ''))
+            w.writerow([str(ip), csv_safe(guess), accuracy,
+                        'Unverified network fingerprint' if accuracy else 'No confident OS fingerprint'])
+    print(f"OS inventory: {output} ({len(results)}/{len(known)} hosts with matches)")
+
+
+def nse_observations(scope, xml, output):
+    """Preserve script output for manual investigation; do not invent severity."""
+    count = 0
+    with open(output, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(['ip', 'port', 'script', 'observation', 'status'])
+        for host, ip in checked_host_rows(xml, scope):
+            for entry in host.findall('./hostscript/script'):
+                w.writerow([ip, '', csv_safe(entry.get('id', '')),
+                            csv_safe(entry.get('output', '')), 'review_required'])
+                count += 1
+            for port in host.findall('./ports/port'):
+                for entry in port.findall('script'):
+                    w.writerow([ip, port.get('portid', ''), csv_safe(entry.get('id', '')),
+                                csv_safe(entry.get('output', '')), 'review_required'])
+                    count += 1
+    print(f"Saved {count} NSE observation(s): {output}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
-    norm = sub.add_parser("normalize", help="validate the scope and write Nmap-compatible targets")
-    norm.add_argument("scope")
-    norm.add_argument("output")
-    hosts = sub.add_parser("hosts", help="verify and deduplicate a host list against scope")
-    hosts.add_argument("scope")
-    hosts.add_argument("input")
-    hosts.add_argument("output")
-    discovery = sub.add_parser("discovery", help="merge host discovery XML files")
-    discovery.add_argument("scope")
-    discovery.add_argument("hosts_output")
-    discovery.add_argument("methods_csv")
-    discovery.add_argument("xml", nargs="+")
-    ports = sub.add_parser("ports", help="extract open ports from Nmap XML to CSV")
-    ports.add_argument("scope")
-    ports.add_argument("xml")
-    ports.add_argument("csv")
-    service = sub.add_parser("service-hosts", help="extract hosts with a particular open TCP port")
-    service.add_argument("scope")
-    service.add_argument("xml")
-    service.add_argument("port", type=int)
-    service.add_argument("output")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest='action', required=True)
+    p = sub.add_parser('normalize')
+    p.add_argument('scope'); p.add_argument('includes'); p.add_argument('excludes', nargs='?')
+    p = sub.add_parser('hosts')
+    p.add_argument('scope'); p.add_argument('host_input'); p.add_argument('output')
+    p = sub.add_parser('check-ip')
+    p.add_argument('scope'); p.add_argument('ip')
+    p = sub.add_parser('discovery')
+    p.add_argument('scope'); p.add_argument('host_output'); p.add_argument('methods_output'); p.add_argument('xml', nargs='+')
+    p = sub.add_parser('ports')
+    p.add_argument('scope'); p.add_argument('xml'); p.add_argument('output')
+    p = sub.add_parser('service-hosts')
+    p.add_argument('scope'); p.add_argument('xml'); p.add_argument('port', type=int); p.add_argument('output')
+    p = sub.add_parser('os-inventory')
+    p.add_argument('scope'); p.add_argument('host_list'); p.add_argument('xml'); p.add_argument('output')
+    p = sub.add_parser('nse')
+    p.add_argument('scope'); p.add_argument('xml'); p.add_argument('output')
+    a = ap.parse_args()
     try:
-        scopes = read_scope(args.scope)
-        if args.command == "normalize":
-            write_lines(args.output, scopes)
-            print(f"Approved scope: {', '.join(str(x) for x in scopes)}")
-        elif args.command == "hosts":
-            write_lines(args.output, read_hosts(args.input, scopes))
-        elif args.command == "discovery":
-            summarize_discovery(scopes, args.xml, args.hosts_output, args.methods_csv)
-        elif args.command == "ports":
-            summarize_ports(args.xml, args.csv, scopes)
-        elif args.command == "service-hosts":
-            service_hosts(args.xml, args.port, args.output, scopes)
+        scope = read_scope(a.scope)
+        if a.action == 'normalize':
+            write_lines(a.includes, scope.includes)
+            if a.excludes:
+                write_lines(a.excludes, scope.excludes)
+            print(f"Allowed target entries: {len(scope.includes)}; exclusions: {len(scope.excludes)}")
+        elif a.action == 'hosts':
+            write_lines(a.output, read_hosts(a.host_input, scope))
+        elif a.action == 'check-ip':
+            ip = ipaddress.IPv4Address(a.ip)
+            if not scope.allows(ip):
+                fail(f"{ip} is excluded or out of scope")
+            print(f"Authorized: {ip}")
+        elif a.action == 'discovery':
+            discovery(scope, a.xml, a.host_output, a.methods_output)
+        elif a.action == 'ports':
+            ports(scope, a.xml, a.output)
+        elif a.action == 'service-hosts':
+            service_hosts(scope, a.xml, a.port, a.output)
+        elif a.action == 'os-inventory':
+            os_inventory(scope, a.host_list, a.xml, a.output)
+        elif a.action == 'nse':
+            nse_observations(scope, a.xml, a.output)
     except (OSError, ValueError, ET.ParseError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

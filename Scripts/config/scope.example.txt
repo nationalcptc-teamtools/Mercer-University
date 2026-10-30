@@ -1,5 +1,8 @@
-# EXAMPLE ONLY. Replace with the approved ROE/SOW ranges before scanning.
-# Only place addresses here that are explicitly in scope.
-# One IPv4 IP or CIDR per line. Subnets broader than /16 are intentionally rejected.
+# Replace with your CURRENT explicitly approved CPTC/lab scope.
+# Every line can be a single IPv4, a CIDR, or an inclusive start-end range.
+# Lines beginning with ! are exclusions. Comments start with #.
+# CAUTION: The example entries are documentation, not authorization.
 192.168.56.0/24
-# 192.168.57.10
+192.168.57.10-192.168.57.30
+!192.168.56.1
+!192.168.57.25-192.168.57.27
