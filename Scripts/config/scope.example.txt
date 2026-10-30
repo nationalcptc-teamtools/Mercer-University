@@ -1,0 +1,5 @@
+# EXAMPLE ONLY. Replace with the approved ROE/SOW ranges before scanning.
+# Only place addresses here that are explicitly in scope.
+# One IPv4 IP or CIDR per line. Subnets broader than /16 are intentionally rejected.
+192.168.56.0/24
+# 192.168.57.10

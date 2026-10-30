@@ -1,0 +1,5 @@
+# Never commit evidence, collected usernames, or engagement-specific scope files.
+results/
+config/scope.txt
+__pycache__/
+*.pyc
